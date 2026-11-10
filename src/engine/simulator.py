@@ -24,7 +24,7 @@ class Simulator:
         self.min_profit_usd = self.settings["min_profit_usd"]
         self.test_amounts_usd = self.settings.get("test_amounts_usd", [500, 1000, 2500])
         self.gas_limit = self.settings["gas_limit_estimate"]
-        # Minimum active liquidity threshold for Uniswap V3 pools.
+        # minimum active liquidity threshold for Uniswap V3 pools.
         self.min_univ3_liquidity = self.settings.get("min_univ3_liquidity", 10**16)
 
         # resolve token decimals and symbols by address
@@ -99,7 +99,7 @@ class Simulator:
         elif pool_type == "univ3":
             sqrt_p = pool_state.get("sqrt_price_x96", 0)
             liq = pool_state.get("liquidity", 0)
-            # Filter out pools without sufficient active liquidity
+            # filter out pools without sufficient active liquidity
             if sqrt_p == 0 or liq < self.min_univ3_liquidity:
                 return 0
             zero_for_one = token_in.lower() < token_out.lower()
@@ -146,7 +146,7 @@ class Simulator:
         eth_price_usd: float = 3000.0,
         touched_pools: Optional[Set[str]] = None,
     ) -> List[Dict[str, Any]]:
-        # Reactive filtering: only evaluate routes where at least one pool was touched in this block
+        # reactive filtering: only evaluate routes where at least one pool was touched in this block
         if touched_pools is not None:
             routes = [
                 r for r in routes
@@ -181,7 +181,7 @@ class Simulator:
             state_1 = pool_states.get(s1["pool"].lower(), {})
             state_2 = pool_states.get(s2["pool"].lower(), {})
 
-            # Gas cost in borrow token units
+            # gas cost in borrow token units
             gas_cost_in_token = FeeEngine.estimate_gas_cost_in_target_token(
                 gas_used=self.gas_limit,
                 gas_price_wei=gas_price_wei,
@@ -189,7 +189,7 @@ class Simulator:
                 target_decimals=decimals,
             )
 
-            # Define objective function for optimizer
+            # define objective function for optimizer
             def profit_func(amount: int) -> int:
                 return self.compute_net_profit(
                     amount_in=amount,
@@ -200,7 +200,7 @@ class Simulator:
                     aave_fee_bps=aave_fee_bps,
                 )
 
-            # Determine search bounds: $100 to $10,000 USD
+            # determine search bounds: $100 to $10,000 USD
             is_stable = symbol in ["USDC", "DAI"]
             multiplier = 1.0 if is_stable else eth_price_usd
 
@@ -216,7 +216,7 @@ class Simulator:
                 max_amount = int((max_bound_usd / eth_price_usd) * (10 ** decimals))
                 probe_amount = int((500.0 / eth_price_usd) * (10 ** decimals))
 
-            # Fast probe: if 500 USD yields no gross profit at all, skip optimization
+            # fast probe: if 500 USD yields no gross profit at all, skip optimization
             amount_mid = self.simulate_swap(
                 s1["type"], state_1, s1["fee"], s1["token_in"], s1["token_out"], probe_amount
             )
@@ -228,7 +228,7 @@ class Simulator:
             if amount_out_probe <= probe_amount:
                 continue
 
-            # Run Golden-Section optimizer to find optimal trade size
+            # run Golden-Section optimizer to find optimal trade size
             opt_borrow_amount, opt_net_profit = ArbitrageOptimizer.optimize_borrow_amount(
                 profit_func=profit_func,
                 min_amount=min_amount,
@@ -243,7 +243,7 @@ class Simulator:
             net_profit_usd = (opt_net_profit / (10 ** decimals)) * multiplier
 
             if net_profit_usd >= self.min_profit_usd:
-                # Recalculate component figures for reporting
+                # recalculate component figures for reporting
                 mid_opt = self.simulate_swap(
                     s1["type"], state_1, s1["fee"], s1["token_in"], s1["token_out"], opt_borrow_amount
                 )

@@ -1,0 +1,12 @@
+[profile.default]
+src = "contracts"
+out = "out"
+libs = ["lib"]
+test = "test"
+cache_path = "forge-cache"
+solc_version = "0.8.20"
+
+[rpc_endpoints]
+arbitrum = "${ARBITRUM_RPC_HTTP}"
+base = "${BASE_RPC_HTTP}"
+polygon = "${POLYGON_RPC_HTTP}"
