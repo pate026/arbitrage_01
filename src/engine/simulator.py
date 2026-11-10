@@ -1,9 +1,10 @@
 import asyncio
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Set
 from web3 import Web3
 from src.config_loader import Config
 from src.engine.route_builder import RouteBuilder
 from src.math.fee_engine import FeeEngine
+from src.math.optimizer import ArbitrageOptimizer
 from src.math.univ2_math import UniV2Math, V2_GET_RESERVES_SELECTOR
 from src.math.univ3_math import (
     UniV3Math,
@@ -21,11 +22,9 @@ class Simulator:
         self.provider = provider
         self.settings = self.config.settings["scanner"]
         self.min_profit_usd = self.settings["min_profit_usd"]
-        self.test_amounts_usd = self.settings["test_amounts_usd"]
+        self.test_amounts_usd = self.settings.get("test_amounts_usd", [500, 1000, 2500])
         self.gas_limit = self.settings["gas_limit_estimate"]
         # Minimum active liquidity threshold for Uniswap V3 pools.
-        # Active liquid pools typically have liquidity > 10**16 (or higher depending on decimals).
-        # We increase the default threshold to 10**16 to filter out illiquid dust pools.
         self.min_univ3_liquidity = self.settings.get("min_univ3_liquidity", 10**16)
 
         # resolve token decimals and symbols by address
@@ -108,12 +107,55 @@ class Simulator:
 
         return 0
 
+    def compute_net_profit(
+        self,
+        amount_in: int,
+        route: Dict[str, Any],
+        state_1: Dict[str, Any],
+        state_2: Dict[str, Any],
+        gas_cost_in_token: int,
+        aave_fee_bps: int,
+    ) -> int:
+        """
+        Calculates raw token net profit (amount_out - amount_in - aave_fee - gas_cost).
+        Used as the objective function for optimization.
+        """
+        s1 = route["step_1"]
+        s2 = route["step_2"]
+
+        amount_mid = self.simulate_swap(
+            s1["type"], state_1, s1["fee"], s1["token_in"], s1["token_out"], amount_in
+        )
+        if amount_mid <= 0:
+            return -amount_in
+
+        amount_out = self.simulate_swap(
+            s2["type"], state_2, s2["fee"], s2["token_in"], s2["token_out"], amount_mid
+        )
+        if amount_out <= amount_in:
+            return -amount_in
+
+        gross_profit = amount_out - amount_in
+        aave_fee = FeeEngine.get_aave_flashloan_fee(amount_in, aave_fee_bps)
+        return gross_profit - aave_fee - gas_cost_in_token
+
     async def scan_routes(
         self,
         routes: List[Dict[str, Any]],
         gas_price_wei: int,
         eth_price_usd: float = 3000.0,
+        touched_pools: Optional[Set[str]] = None,
     ) -> List[Dict[str, Any]]:
+        # Reactive filtering: only evaluate routes where at least one pool was touched in this block
+        if touched_pools is not None:
+            routes = [
+                r for r in routes
+                if r["step_1"]["pool"].lower() in touched_pools
+                or r["step_2"]["pool"].lower() in touched_pools
+            ]
+            if not routes:
+                return []
+
         # extracts unique pools needed across all routes
         unique_pools = {}
         for r in routes:
@@ -124,6 +166,7 @@ class Simulator:
 
         pool_states = await self.fetch_pool_states(list(unique_pools.values()))
         profitable_opportunities: List[Dict[str, Any]] = []
+        aave_fee_bps = self.config.chain.get("aave_flashloan_fee_bps", 5)
 
         for route in routes:
             borrow_token = route["borrow_token"].lower()
@@ -138,69 +181,94 @@ class Simulator:
             state_1 = pool_states.get(s1["pool"].lower(), {})
             state_2 = pool_states.get(s2["pool"].lower(), {})
 
-            for amount_usd in self.test_amounts_usd:
-                if symbol in ["USDC", "DAI"]:
-                    amount_in = int(amount_usd * (10 ** decimals))
-                elif symbol in ["WETH", "cbETH"]:
-                    amount_in = int((amount_usd / eth_price_usd) * (10 ** decimals))
-                else:
-                    continue
+            # Gas cost in borrow token units
+            gas_cost_in_token = FeeEngine.estimate_gas_cost_in_target_token(
+                gas_used=self.gas_limit,
+                gas_price_wei=gas_price_wei,
+                native_token_price_in_target=eth_price_usd if symbol in ["USDC", "DAI"] else 1.0,
+                target_decimals=decimals,
+            )
 
-                # step 1: borrow_token -> target_token
-                amount_mid = self.simulate_swap(
-                    s1["type"], state_1, s1["fee"], s1["token_in"], s1["token_out"], amount_in
-                )
-                if amount_mid <= 0:
-                    continue
-
-                # step 2: target_token -> borrow_token
-                amount_out = self.simulate_swap(
-                    s2["type"], state_2, s2["fee"], s2["token_in"], s2["token_out"], amount_mid
-                )
-                if amount_out <= amount_in:
-                    continue
-
-                # gross profit
-                gross_profit = amount_out - amount_in
-
-                # aave flashloan fee
-                aave_fee = FeeEngine.get_aave_flashloan_fee(
-                    amount_in, self.config.chain.get("aave_flashloan_fee_bps", 5)
+            # Define objective function for optimizer
+            def profit_func(amount: int) -> int:
+                return self.compute_net_profit(
+                    amount_in=amount,
+                    route=route,
+                    state_1=state_1,
+                    state_2=state_2,
+                    gas_cost_in_token=gas_cost_in_token,
+                    aave_fee_bps=aave_fee_bps,
                 )
 
-                # gas cost
-                gas_cost_in_token = FeeEngine.estimate_gas_cost_in_target_token(
-                    gas_used=self.gas_limit,
-                    gas_price_wei=gas_price_wei,
-                    native_token_price_in_target=eth_price_usd if symbol in ["USDC", "DAI"] else 1.0,
-                    target_decimals=decimals,
+            # Determine search bounds: $100 to $10,000 USD
+            is_stable = symbol in ["USDC", "DAI"]
+            multiplier = 1.0 if is_stable else eth_price_usd
+
+            min_bound_usd = 100.0
+            max_bound_usd = 10000.0
+
+            if is_stable:
+                min_amount = int(min_bound_usd * (10 ** decimals))
+                max_amount = int(max_bound_usd * (10 ** decimals))
+                probe_amount = int(500.0 * (10 ** decimals))
+            else:
+                min_amount = int((min_bound_usd / eth_price_usd) * (10 ** decimals))
+                max_amount = int((max_bound_usd / eth_price_usd) * (10 ** decimals))
+                probe_amount = int((500.0 / eth_price_usd) * (10 ** decimals))
+
+            # Fast probe: if 500 USD yields no gross profit at all, skip optimization
+            amount_mid = self.simulate_swap(
+                s1["type"], state_1, s1["fee"], s1["token_in"], s1["token_out"], probe_amount
+            )
+            if amount_mid <= 0:
+                continue
+            amount_out_probe = self.simulate_swap(
+                s2["type"], state_2, s2["fee"], s2["token_in"], s2["token_out"], amount_mid
+            )
+            if amount_out_probe <= probe_amount:
+                continue
+
+            # Run Golden-Section optimizer to find optimal trade size
+            opt_borrow_amount, opt_net_profit = ArbitrageOptimizer.optimize_borrow_amount(
+                profit_func=profit_func,
+                min_amount=min_amount,
+                max_amount=max_amount,
+                tolerance=max(1, int(10 * (10 ** decimals) if is_stable else 0.005 * (10 ** decimals))),
+                max_iterations=20,
+            )
+
+            if opt_net_profit <= 0:
+                continue
+
+            net_profit_usd = (opt_net_profit / (10 ** decimals)) * multiplier
+
+            if net_profit_usd >= self.min_profit_usd:
+                # Recalculate component figures for reporting
+                mid_opt = self.simulate_swap(
+                    s1["type"], state_1, s1["fee"], s1["token_in"], s1["token_out"], opt_borrow_amount
                 )
+                final_out = self.simulate_swap(
+                    s2["type"], state_2, s2["fee"], s2["token_in"], s2["token_out"], mid_opt
+                )
+                gross_profit = final_out - opt_borrow_amount
+                aave_fee = FeeEngine.get_aave_flashloan_fee(opt_borrow_amount, aave_fee_bps)
 
-                net_profit = gross_profit - aave_fee - gas_cost_in_token
-
-                if symbol in ["USDC", "DAI"]:
-                    net_profit_usd = net_profit / (10 ** decimals)
-                else:
-                    net_profit_usd = (net_profit / (10 ** decimals)) * eth_price_usd
-
-                if net_profit_usd >= self.min_profit_usd:
-                    is_stable = symbol in ["USDC", "DAI"]
-                    multiplier = 1.0 if is_stable else eth_price_usd
-                    profitable_opportunities.append({
-                        "route": route,
-                        "borrow_symbol": symbol,
-                        "borrow_amount": amount_in,
-                        "borrow_amount_usd": amount_usd,
-                        "expected_amount_out": amount_out,
-                        "gross_profit_usd": (gross_profit / (10 ** decimals)) * multiplier,
-                        "aave_fee_usd": (aave_fee / (10 ** decimals)) * multiplier,
-                        "gas_cost_usd": (gas_cost_in_token / (10 ** decimals)) * multiplier,
-                        "net_profit_usd": net_profit_usd,
-                        "s1_liq": state_1.get("liquidity", 0),
-                        "s2_liq": state_2.get("liquidity", 0),
-                        "s1_sqrt_price": state_1.get("sqrt_price_x96", 0),
-                        "s2_sqrt_price": state_2.get("sqrt_price_x96", 0),
-                    })
+                borrow_usd = (opt_borrow_amount / (10 ** decimals)) * multiplier
+                profitable_opportunities.append({
+                    "route": route,
+                    "borrow_symbol": symbol,
+                    "borrow_amount": opt_borrow_amount,
+                    "borrow_amount_usd": round(borrow_usd, 2),
+                    "expected_amount_out": final_out,
+                    "gross_profit_usd": (gross_profit / (10 ** decimals)) * multiplier,
+                    "aave_fee_usd": (aave_fee / (10 ** decimals)) * multiplier,
+                    "gas_cost_usd": (gas_cost_in_token / (10 ** decimals)) * multiplier,
+                    "net_profit_usd": net_profit_usd,
+                    "s1_liq": state_1.get("liquidity", 0),
+                    "s2_liq": state_2.get("liquidity", 0),
+                    "s1_sqrt_price": state_1.get("sqrt_price_x96", 0),
+                    "s2_sqrt_price": state_2.get("sqrt_price_x96", 0),
+                })
 
         return profitable_opportunities
 

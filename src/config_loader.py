@@ -8,15 +8,32 @@ from web3 import Web3
 # project root path relative to this file
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+
 class Config:
     def __init__(self, chain_name: str = "base"):
-        load_dotenv(PROJECT_ROOT / ".env")
-        
+        # Set override=True so changes in .env always take precedence over stale shell variables
+        load_dotenv(PROJECT_ROOT / ".env", override=True)
+
         self.chain_name = chain_name.lower()
         self.settings = self._load_json(PROJECT_ROOT / "configs" / "settings.json")
         self.chain = self._load_json(PROJECT_ROOT / "configs" / "chains" / f"{self.chain_name}.json")
-        
+
         self._validate_and_setup()
+
+    @property
+    def masked_rpc_http(self) -> str:
+        """Returns the RPC HTTP URL with sensitive API keys masked for safe logging."""
+        if not self.rpc_http:
+            return ""
+        if "/" not in self.rpc_http:
+            return self.rpc_http
+        parts = self.rpc_http.rsplit("/", 1)
+        endpoint, secret = parts[0], parts[1]
+        if len(secret) > 8:
+            masked = f"{secret[:4]}...{secret[-4:]}"
+        else:
+            masked = "****"
+        return f"{endpoint}/{masked}"
 
     def _load_json(self, path: Path) -> Dict[str, Any]:
         if not path.exists():
@@ -49,9 +66,11 @@ class Config:
             raise KeyError(f"Token '{symbol_upper}' not found in the {self.chain_name} network configuration.")
         return self.chain["tokens"][symbol_upper]
 
+
 if __name__ == "__main__":
-    # quick test to run from the terminal: python src/config_loader.py
+    # quick test to run from the terminal: python -m src.config_loader --chain base
     import argparse
+
     parser = argparse.ArgumentParser(description="Test configuration loading")
     parser.add_argument("--chain", default="base", help="Network name (for example, base)")
     args = parser.parse_args()
@@ -59,7 +78,7 @@ if __name__ == "__main__":
     cfg = Config(chain_name=args.chain)
     print(f"[OK] Configuration loaded successfully for network: {cfg.chain_name.upper()}")
     print(f" - Chain ID: {cfg.chain['chain_id']}")
-    print(f" - RPC HTTP: {cfg.rpc_http}")
+    print(f" - RPC HTTP: {cfg.masked_rpc_http}")
     print(f" - Multicall3: {cfg.multicall3}")
     print(f" - Tracked tokens: {len(cfg.chain['tokens'])}")
     print(f" - DEX factories: {len(cfg.chain['dexes'])}")
