@@ -1,7 +1,6 @@
 import asyncio
 from typing import Any, Dict, List
 from web3 import Web3
-
 from src.config_loader import Config
 from src.engine.route_builder import RouteBuilder
 from src.math.fee_engine import FeeEngine
@@ -24,6 +23,10 @@ class Simulator:
         self.min_profit_usd = self.settings["min_profit_usd"]
         self.test_amounts_usd = self.settings["test_amounts_usd"]
         self.gas_limit = self.settings["gas_limit_estimate"]
+        # Minimum active liquidity threshold for Uniswap V3 pools.
+        # Active liquid pools typically have liquidity > 10**16 (or higher depending on decimals).
+        # We increase the default threshold to 10**16 to filter out illiquid dust pools.
+        self.min_univ3_liquidity = self.settings.get("min_univ3_liquidity", 10**16)
 
         # resolve token decimals and symbols by address
         self.token_meta: Dict[str, Dict[str, Any]] = {}
@@ -37,7 +40,6 @@ class Simulator:
         # batch-fetches on-chain state for all unique pools using multicall3
         calls = []
         call_map = []
-
         for address, pool_type in pool_addresses_and_types:
             addr_cs = Web3.to_checksum_address(address)
             if pool_type == "univ2":
@@ -50,12 +52,11 @@ class Simulator:
                 call_map.append((address.lower(), "v3_liquidity"))
 
         results = await self.multicall.aggregate3(calls)
-
         pool_states: Dict[str, Dict[str, Any]] = {}
+
         for (pool_addr, data_type), (success, raw_bytes) in zip(call_map, results):
             if pool_addr not in pool_states:
                 pool_states[pool_addr] = {}
-
             if not success or not raw_bytes:
                 continue
 
@@ -99,7 +100,8 @@ class Simulator:
         elif pool_type == "univ3":
             sqrt_p = pool_state.get("sqrt_price_x96", 0)
             liq = pool_state.get("liquidity", 0)
-            if sqrt_p == 0 or liq == 0:
+            # Filter out pools without sufficient active liquidity
+            if sqrt_p == 0 or liq < self.min_univ3_liquidity:
                 return 0
             zero_for_one = token_in.lower() < token_out.lower()
             return UniV3Math.get_amount_out(amount_in, sqrt_p, liq, fee, zero_for_one)
@@ -121,7 +123,6 @@ class Simulator:
             unique_pools[s2["pool"].lower()] = (s2["pool"], s2["type"])
 
         pool_states = await self.fetch_pool_states(list(unique_pools.values()))
-
         profitable_opportunities: List[Dict[str, Any]] = []
 
         for route in routes:
@@ -132,7 +133,6 @@ class Simulator:
 
             decimals = meta["decimals"]
             symbol = meta["symbol"]
-
             s1 = route["step_1"]
             s2 = route["step_2"]
             state_1 = pool_states.get(s1["pool"].lower(), {})
@@ -184,16 +184,22 @@ class Simulator:
                     net_profit_usd = (net_profit / (10 ** decimals)) * eth_price_usd
 
                 if net_profit_usd >= self.min_profit_usd:
+                    is_stable = symbol in ["USDC", "DAI"]
+                    multiplier = 1.0 if is_stable else eth_price_usd
                     profitable_opportunities.append({
                         "route": route,
                         "borrow_symbol": symbol,
                         "borrow_amount": amount_in,
                         "borrow_amount_usd": amount_usd,
                         "expected_amount_out": amount_out,
-                        "gross_profit_usd": (gross_profit / (10 ** decimals)) * (1.0 if symbol in ["USDC", "DAI"] else eth_price_usd),
-                        "aave_fee_usd": (aave_fee / (10 ** decimals)) * (1.0 if symbol in ["USDC", "DAI"] else eth_price_usd),
-                        "gas_cost_usd": (gas_cost_in_token / (10 ** decimals)) * (1.0 if symbol in ["USDC", "DAI"] else eth_price_usd),
+                        "gross_profit_usd": (gross_profit / (10 ** decimals)) * multiplier,
+                        "aave_fee_usd": (aave_fee / (10 ** decimals)) * multiplier,
+                        "gas_cost_usd": (gas_cost_in_token / (10 ** decimals)) * multiplier,
                         "net_profit_usd": net_profit_usd,
+                        "s1_liq": state_1.get("liquidity", 0),
+                        "s2_liq": state_2.get("liquidity", 0),
+                        "s1_sqrt_price": state_1.get("sqrt_price_x96", 0),
+                        "s2_sqrt_price": state_2.get("sqrt_price_x96", 0),
                     })
 
         return profitable_opportunities
@@ -216,12 +222,11 @@ if __name__ == "__main__":
 
         print(f"--- scan results ---")
         print(f"profitable opportunities found: {len(opps)}")
-
         for op in opps[:3]:
             print(f"\n[OPPORTUNITY] {op['borrow_symbol']} route:")
             print(f" - borrowed: {op['borrow_amount_usd']} usd")
-            print(f" - step 1: {op['route']['step_1']['dex']} (fee {op['route']['step_1']['fee']})")
-            print(f" - step 2: {op['route']['step_2']['dex']} (fee {op['route']['step_2']['fee']})")
+            print(f" - step 1: {op['route']['step_1']['dex']} (fee {op['route']['step_1']['fee']}) | pool: {op['route']['step_1']['pool']} | liq: {op.get('s1_liq', 0)}")
+            print(f" - step 2: {op['route']['step_2']['dex']} (fee {op['route']['step_2']['fee']}) | pool: {op['route']['step_2']['pool']} | liq: {op.get('s2_liq', 0)}")
             print(f" - net profit: ${op['net_profit_usd']:.2f} usd")
 
     asyncio.run(main())
