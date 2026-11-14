@@ -6,7 +6,7 @@ from eth_account import Account
 from src.config_loader import Config
 from src.rpc.provider import RPCProvider
 
-# Minimal ABI containing only the function we need to call
+# minimal abi containing only the function we need to call
 EXECUTOR_ABI = [
     {
         "inputs": [
@@ -56,27 +56,27 @@ class TransactionSender:
         self.config = config
         self.w3 = provider.w3
         
-        # Load Private Key securely from environment
+        # load private key securely from environment
         private_key = os.getenv("PRIVATE_KEY")
         if not private_key:
-            print("[WARN] PRIVATE_KEY not found in .env. Transactions cannot be sent.")
+            print("[warn] private_key not found in .env. transactions cannot be sent.")
             self.account = None
         else:
             self.account = Account.from_key(private_key)
             
-        # Load Executor Contract Address based on the current chain
+        # load executor contract address based on the current chain
         prefix = self.config.chain.get("rpc_env_prefix", self.config.chain_name.upper())
         contract_address = os.getenv(f"{prefix}_EXECUTOR_ADDRESS")
         
         if not contract_address:
-            print(f"[WARN] {prefix}_EXECUTOR_ADDRESS not found in .env. Dry-run mode only.")
+            print(f"[warn] {prefix}_executor_address not found in .env. dry-run mode only.")
             self.contract = None
         else:
             checksummed_address = AsyncWeb3.to_checksum_address(contract_address)
             self.contract = self.w3.eth.contract(address=checksummed_address, abi=EXECUTOR_ABI)
 
     def _map_dex_type(self, dex_type_str: str) -> int:
-        """Converts Python string types to Solidity uint8 enums."""
+        """converts python string types to solidity uint8 enums."""
         if dex_type_str in ["univ2", "aerodrome_v2", "quickswap_v2"]:
             return 2
         elif dex_type_str in ["univ3", "aerodrome_cl", "pancakeswap_v3"]:
@@ -85,17 +85,17 @@ class TransactionSender:
 
     async def send_arbitrage_tx(self, payload_dict: Dict[str, Any], gas_price_wei: int) -> str:
         """
-        Builds, signs, and sends the arbitrage transaction to the mempool.
+        builds, signs, and sends the arbitrage transaction to the mempool.
         """
         if not self.account or not self.contract:
             return "skipped (missing keys/address)"
 
-        # 1. Format payload for Solidity
-        # PayloadBuilder outputs route_hops. We map these to SwapStep structs.
+        # 1. format payload for solidity
+        # payloadbuilder outputs route_hops. we map these to swapstep structs.
         hop1 = payload_dict["route_hops"][0]
         hop2 = payload_dict["route_hops"][1]
         
-        # We need the router address from the config for these DEXes
+        # we need the router address from the config for these dexes
         dex1_config = self.config.chain["dexes"][hop1["dex"]]
         dex2_config = self.config.chain["dexes"][hop2["dex"]]
         
@@ -122,7 +122,7 @@ class TransactionSender:
         )
 
         try:
-            # 2. Build transaction
+            # 2. build transaction
             nonce = await self.w3.eth.get_transaction_count(self.account.address)
             
             tx = await self.contract.functions.executeArbitrage(solidity_payload).build_transaction({
@@ -132,17 +132,17 @@ class TransactionSender:
                 'gasPrice': gas_price_wei,
             })
 
-            # 3. Sign transaction
+            # 3. sign transaction
             signed_tx = self.w3.eth.account.sign_transaction(tx, private_key=self.account.key)
 
-            # 4. Send transaction
-            print(f"[TX] Broadcasting transaction for {payload_dict['borrow_symbol']} arbitrage...")
+            # 4. send transaction
+            print(f"[tx] broadcasting transaction for {payload_dict['borrow_symbol']} arbitrage...")
             tx_hash = await self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
             
             hex_hash = self.w3.to_hex(tx_hash)
-            print(f"[TX] Success! Hash: {hex_hash}")
+            print(f"[tx] success! hash: {hex_hash}")
             return hex_hash
 
         except Exception as e:
-            print(f"[TX ERROR] Failed to send transaction: {str(e)}")
+            print(f"[tx error] failed to send transaction: {str(e)}")
             return "error"

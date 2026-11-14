@@ -18,3 +18,9 @@ data/logs/*
 .vscode/
 .idea/
 *.swp
+
+#foundry
+out/
+cache/
+forge-cache/
+broadcast/

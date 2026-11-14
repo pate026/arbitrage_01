@@ -9,19 +9,19 @@ from src.config_loader import Config
 from src.rpc.provider import RPCProvider
 from src.rpc.multicall import Multicall
 
-# Factory contract function selectors
-# Uniswap V2: getPair(address tokenA, address tokenB) -> address
+# factory contract function selectors
+# uniswap v2: getPair(address tokenA, address tokenB) -> address
 V2_GET_PAIR_SELECTOR = bytes.fromhex("e6a43905")
-# Uniswap V3: getPool(address tokenA, address tokenB, uint24 fee) -> address
+# uniswap v3: getPool(address tokenA, address tokenB, uint24 fee) -> address
 V3_GET_POOL_SELECTOR = bytes.fromhex("1698ee82")
-# Aerodrome Classic / Solidly: getPool(address tokenA, address tokenB, bool stable) -> address
+# aerodrome classic / solidly: getPool(address tokenA, address tokenB, bool stable) -> address
 # keccak256("getPool(address,address,bool)")[:4] -> 0x16b0d389
 AERO_V2_GET_POOL_SELECTOR = bytes.fromhex("16b0d389")
-# Aerodrome Slipstream CL: getPool(address tokenA, address tokenB, int24 tickSpacing) -> address
+# aerodrome slipstream cl: getPool(address tokenA, address tokenB, int24 tickSpacing) -> address
 # keccak256("getPool(address,address,int24)")[:4] -> 0xb43126f2
 AERO_CL_GET_POOL_SELECTOR = bytes.fromhex("b43126f2")
 
-# Typical fee mappings for Aerodrome Slipstream tickSpacings (in Uniswap v3 fee units: millionths)
+# typical fee mappings for aerodrome slipstream tickspacings (in uniswap v3 fee units: millionths)
 AERO_TICKSPACING_FEES: Dict[int, int] = {
     1: 100,      # 0.01%
     10: 500,     # 0.05%
@@ -41,19 +41,19 @@ class PoolFinder:
         self.cache_file = self.cache_dir / f"{self.config.chain_name}_pools.json"
 
     async def find_pools(self, force_refresh: bool = False) -> Dict[str, Any]:
-        """Find active pools from factory contracts and save them to the cache."""
+        """find active pools from factory contracts and save them to the cache."""
         if not force_refresh and self.cache_file.exists():
             with open(self.cache_file, "r", encoding="utf-8") as f:
                 return json.load(f)
 
-        print("[INFO] Discovering active pools with a Multicall request...")
+        print("[info] discovering active pools with a multicall request...")
         tokens = list(self.config.chain["tokens"].values())
         token_addresses = [t["address"] for t in tokens]
 
         calls = []
         call_context = []  # metadata attached to each call
 
-        # Generate unique token pair permutations
+        # generate unique token pair permutations
         for i in range(len(token_addresses)):
             for j in range(i + 1, len(token_addresses)):
                 token_a = token_addresses[i]
@@ -73,7 +73,7 @@ class PoolFinder:
                         fee_bps = dex_data.get("fee_bps", 30)
                         call_data = AERO_V2_GET_POOL_SELECTOR + encode(["address", "address", "bool"], [token_a, token_b, stable])
                         calls.append((factory, True, call_data))
-                        # Internal simulation for volatile aerodrome behaves identically to univ2 (x * y = k)
+                        # internal simulation for volatile aerodrome behaves identically to univ2 (x * y = k)
                         call_context.append((dex_name, "univ2", token_a, token_b, fee_bps))
 
                     elif dex_type == "univ3":
@@ -87,7 +87,7 @@ class PoolFinder:
                             call_data = AERO_CL_GET_POOL_SELECTOR + encode(["address", "address", "int24"], [token_a, token_b, tick_spacing])
                             fee = AERO_TICKSPACING_FEES.get(tick_spacing, 3000)
                             calls.append((factory, True, call_data))
-                            # Aerodrome CL uses identical slot0/liquidity/swap formulas as univ3
+                            # aerodrome cl uses identical slot0/liquidity/swap formulas as univ3
                             call_context.append((dex_name, "univ3", token_a, token_b, fee))
 
         results = await self.multicall.aggregate3(calls)
@@ -133,6 +133,6 @@ if __name__ == "__main__":
             total_pools += count
             print(f" - {dex}: {count} active pools")
 
-        print(f"[OK] Found and cached {total_pools} pools in total ({finder.cache_file.name}).")
+        print(f"[ok] found and cached {total_pools} pools in total ({finder.cache_file.name}).")
 
     asyncio.run(main())

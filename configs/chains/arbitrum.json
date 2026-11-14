@@ -6,6 +6,7 @@
   "aave_v3_pool": "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
   "aave_flashloan_fee_bps": 5,
   "wrapped_native_token": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+
   "dexes": {
     "uniswap_v3": {
       "type": "univ3",
@@ -26,27 +27,53 @@
       "fee_tiers": [100, 500, 2500, 10000]
     }
   },
+
   "tokens": {
     "WETH": {
       "address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
-      "decimals": 18
+      "decimals": 18,
+      "price": {
+        "source": "chainlink",
+        "feed": "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612"
+      }
     },
+
     "USDC": {
       "address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-      "decimals": 6
+      "decimals": 6,
+      "price": {
+        "source": "fixed",
+        "usd": 1.0
+      }
     },
+
     "USDC_E": {
       "address": "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8",
-      "decimals": 6
+      "decimals": 6,
+      "price": {
+        "source": "fixed",
+        "usd": 1.0
+      }
     },
+
     "USDT": {
       "address": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
-      "decimals": 6
+      "decimals": 6,
+      "price": {
+        "source": "fixed",
+        "usd": 1.0
+      }
     },
+
     "ARB": {
       "address": "0x912CE59144191C1204E64559FE8253a0e49E6548",
-      "decimals": 18
+      "decimals": 18,
+      "price": {
+        "source": "chainlink",
+        "feed": "0xb2A824043730FE05F3DA2efaFa1CBbe83fa548D6"
+      }
     },
+
     "WBTC": {
       "address": "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",
       "decimals": 8

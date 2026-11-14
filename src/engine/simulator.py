@@ -11,6 +11,7 @@ from src.math.univ3_math import (
     v3_liquidity_selector,
     v3_slot0_selector,
 )
+from src.pricing.price_provider import PriceProvider
 from src.rpc.multicall import Multicall
 from src.rpc.provider import RPCProvider
 
@@ -20,6 +21,10 @@ class Simulator:
         self.config = config
         self.multicall = multicall
         self.provider = provider
+        self.price_provider = PriceProvider(
+            config=self.config,
+            provider=self.provider,
+        )
         self.settings = self.config.settings["scanner"]
         self.min_profit_usd = self.settings["min_profit_usd"]
         self.test_amounts_usd = self.settings.get("test_amounts_usd", [500, 1000, 2500])
@@ -34,6 +39,22 @@ class Simulator:
                 "symbol": symbol,
                 "decimals": data["decimals"],
             }
+        wrapped_native_address = self.config.chain[
+            "wrapped_native_token"
+        ].lower()
+
+        wrapped_native_meta = self.token_meta.get(
+            wrapped_native_address
+        )
+
+        if wrapped_native_meta is None:
+            raise ValueError(
+              "wrapped native token is missing"
+              "from"
+              f"{self.config.chain_name} token configuration."
+              )
+
+        self.native_token_symbol = wrapped_native_meta["symbol"]        
 
     async def fetch_pool_states(self, pool_addresses_and_types: List[tuple[str, str]]) -> Dict[str, Dict[str, Any]]:
         # batch-fetches on-chain state for all unique pools using multicall3
